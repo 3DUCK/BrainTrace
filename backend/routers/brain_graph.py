@@ -56,6 +56,8 @@ from services import manual_chunking_sentences
 import time
 import json
 import re
+from services.intent_service import IntentService
+from services.agent_service import AgentService
 
 # LangChain imports
 try:
@@ -739,6 +741,55 @@ async def answer_endpoint(request_data: AnswerRequest):
     try:
         # SQLite 핸들러: 소스 메타데이터(title 등) 조회와 채팅 로그 저장에 사용
         db_handler = SQLiteHandler()
+
+        # ───────── [NEW] 의도 분석 및 라우팅 ───────── #
+        intent_service = IntentService(ai_service)
+        analysis_result = intent_service.analyze_intent(question)
+        intent = analysis_result.get("intent", "RAG")
+        logging.info(f"🧠 의도 분석 결과: {intent} (이유: {analysis_result.get('reason')})")
+
+        # 1. SIMPLE: 단순 대화 (RAG 건너뜀)
+        if intent == "SIMPLE":
+            logging.info("🗣️ SIMPLE 의도 감지 -> LLM 직접 호출")
+            simple_answer = "[LLM] " + ai_service.chat(question)
+            
+            # 채팅 저장
+            chat_id = db_handler.save_chat(session_id, True, simple_answer, [], 0.0)
+            return {
+                "answer": simple_answer,
+                "referenced_nodes": [],
+                "chat_id": chat_id,
+                "accuracy": 0.0,
+                "intent": "SIMPLE"
+            }
+
+        # 2. AGENT: 에이전트 실행
+        elif intent == "AGENT":
+            logging.info("🤖 AGENT 의도 감지 -> AgentService 호출")
+            agent_service = AgentService()
+            
+            # 데모용으로 'demo_agent.py' 고정 실행 (실제로는 intent에 따라 분기 가능)
+            agent_input = {
+                "question": question,
+                "params": analysis_result.get("params", {})
+            }
+            
+            agent_result = agent_service.run_agent("demo_agent.py", agent_input)
+            agent_answer = "[Agent] " + agent_result.get("answer", "에이전트 실행 중 오류가 발생했습니다.")
+            
+            # 채팅 저장
+            chat_id = db_handler.save_chat(session_id, True, agent_answer, [], 0.0)
+            return {
+                "answer": agent_answer,
+                "referenced_nodes": [],
+                "chat_id": chat_id,
+                "accuracy": 0.0,
+                "intent": "AGENT",
+                "agent_data": agent_result.get("data", {})
+            }
+
+        # 3. RAG: 기존 로직 실행
+        logging.info("📚 RAG 의도 감지 -> 기존 파이프라인 실행")
         
         # Step 1: 컬렉션이 없으면 초기화
         if not embedding_service.is_index_ready(brain_id):
@@ -760,7 +811,7 @@ async def answer_endpoint(request_data: AnswerRequest):
                 f"답변:"
             )
             final_answer = ai_service.chat(general_prompt)
-            final_answer = final_answer.strip()
+            final_answer = "[RAG] " + final_answer.strip()
             
             # 일반 지식 답변 저장
             chat_id = db_handler.save_chat(session_id, True, final_answer, [], 0.0)
@@ -908,7 +959,7 @@ async def answer_endpoint(request_data: AnswerRequest):
                 f"답변:"
             )
             final_answer = ai_service.chat(general_prompt)
-            final_answer = final_answer.strip()
+            final_answer = "[RAG] " + final_answer.strip()
             
             # 일반 지식 답변 저장
             chat_id = db_handler.save_chat(session_id, True, final_answer, [], 0.0)
@@ -1154,13 +1205,14 @@ async def answer_endpoint(request_data: AnswerRequest):
                 f"답변:"
             )
             final_answer = ai_service.chat(general_prompt)
-            final_answer = final_answer.strip()
+            final_answer = "[RAG] " + final_answer.strip() 
             referenced_nodes = []
             Q = 0.0
             is_general_knowledge_answer = True
         else:
             # referenced_nodes = ai_service.extract_referenced_nodes(final_answer)
             referenced_nodes = ai_service.generate_referenced_nodes(final_answer,brain_id) #출처 노드 반환 함수
+            final_answer = "[RAG] " + final_answer # 성공 시 [RAG] 태그 추가
         
         # referenced_nodes 내용을 텍스트로 final_answer 뒤에 추가
         if referenced_nodes:
